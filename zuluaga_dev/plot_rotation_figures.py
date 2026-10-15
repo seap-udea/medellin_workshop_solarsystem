@@ -32,7 +32,7 @@ from util import ALL_BANDS, BANDS, band_colors
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
-FIG_DIR = ROOT / "figall"
+FIG_DIR = ROOT / "figcomp"
 ROTATION_CATALOG = DATA_DIR / "asteroids-with-rotation.csv"
 DESIGNATIONS = DATA_DIR / "mpc_designations.csv"
 OBS_FILE = DATA_DIR / "obs_sbn_X05_full.parquet"
@@ -618,8 +618,8 @@ def select_provid_rotation():
         "periodogram",  # periodogram: Lomb-Scargle power vs rotational period
         "phase",        # phase_allbands: phase curve in every band, raw and normalized
         #"timemodel",    # timemodel_H: nightly light curve with the periodogram model
-        #"literature",   # phase_model_all_periods: folded curve at our period and the literature periods
-        #"compare",      # period_compare_lsm and period_compare_fourier: our period vs literature, once for the sample
+        "literature",   # phase_model_all_periods: folded curve at our period and the literature periods
+        "compare",      # period_compare_lsm and period_compare_fourier: our period vs literature, once for the sample
     }
     df_rot = load_rotation_catalog()
     return _selection_tables(df_rot["provid"].tolist(), figures)
@@ -631,8 +631,9 @@ def main():
     # select_provid_all: more than MIN_N_OBS observations
     # select_provid_list: the list written inside that function
     # select_provid_rotation: asteroids-with-rotation.csv
-    selected, df_set, df_rot, figures = select_provid_all()
+    # selected, df_set, df_rot, figures = select_provid_all()
     # selected, df_set, df_rot, figures = select_provid_list()
+    selected, df_set, df_rot, figures = select_provid_rotation()
     designations = load_mpc_designations()
 
     measured = {}
