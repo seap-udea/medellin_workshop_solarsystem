@@ -6,6 +6,7 @@ import gzip
 import os
 from astropy.time import Time
 from astroquery.jplhorizons import Horizons
+import pandas as pd
 
 DEG = np.pi / 180.0
 RAD = 1.0 / DEG
@@ -56,7 +57,7 @@ def ecl_gal(npoints=1000):
 
     return [[ecl_ra, ecl_dec], [gal_ra, gal_dec]]
 
-def get_data():
+def get_data(data_dir='data/'):
     """
     Downloads the data files specified in get_data.sh.
     Creates the 'data/' directory if it does not exist and downloads the required files using wget or gdown.
@@ -66,19 +67,19 @@ def get_data():
 
     files = [
         {
-            "filename": "data/obs_sbn_X05_full.parquet",
-            "cmd": 'wget -P data/ https://storage.googleapis.com/asteroid-institute-public/production/rubin/mpc/obs_sbn/full/parquet/obs_sbn_X05_full.parquet'
+            "filename": data_dir + "obs_sbn_X05_full.parquet",
+            "cmd": f'wget -P {data_dir} https://storage.googleapis.com/asteroid-institute-public/production/rubin/mpc/obs_sbn/full/parquet/obs_sbn_X05_full.parquet'
+        },  
+        {
+            "filename": data_dir + "mpcorb_extended.dat.gz",
+            "cmd": f'wget -P {data_dir} https://minorplanetcenter.net/Extended_Files/mpcorb_extended.dat.gz'
         },
         {
-            "filename": "data/mpcorb_extended.dat.gz",
-            "cmd": 'wget -P data/ https://minorplanetcenter.net/Extended_Files/mpcorb_extended.dat.gz'
-        },
-        {
-            "filename": "data/asteroids-with-rotation.csv",
+            "filename": data_dir + "asteroids-with-rotation.csv",
             "cmd": 'gdown 1afQHJYa6bAyIhbP1_dwBoyY0YYzMI7y5'
         },
         {
-            "filename": "data/X05_simplified.csv",
+            "filename": data_dir + "X05_simplified.csv",
             "cmd": 'gdown 1bre3OmMF1xvr3puWUfhhUq_OwRXFltS5'
         }
     ]
@@ -319,3 +320,39 @@ def query_dists_and_elements(nombre_objeto, obstimes, batch_size=50):
         M[start:stop] = np.asarray(elems['M'], dtype=float)
 
     return dist, alpha, r, a, e, inc, omega, Omega, M
+
+import re
+
+def geometry_designations():
+    """Map an MPC number, and a provisional designation, to mpc_designation.
+
+    Numbered asteroids are stored as '(1232) Cortusa', not as '1931 TF2'.
+    Unnumbered ones keep the provisional designation.
+    """
+    designations = pd.read_parquet(
+        "data/obs_final_elements_geometry_H.parquet",
+        columns=["mpc_designation"],
+    )["mpc_designation"].dropna().astype(str).unique()
+    by_number, by_provid = {}, {}
+    numbered = re.compile(r"^\((\d+)\)")
+    for name in designations:
+        match = numbered.match(name)
+        if match:
+            by_number[match.group(1)] = name
+        else:
+            by_provid[name] = name
+    return by_number, by_provid
+
+
+def mpc_designation_for(df_set, provid, permid=None):
+    """Geometry-file designation for this asteroid, or None."""
+    by_number, by_provid = geometry_designations()
+    if permid is None:
+        ids = df_set.loc[df_set["provid"] == provid, "permid"].dropna()
+        if len(ids):
+            permid = ids.iloc[0]
+    if pd.notna(permid) and str(permid).strip() != "":
+        number = str(int(float(permid)))
+        if number in by_number:
+            return by_number[number]
+    return by_provid.get(provid)

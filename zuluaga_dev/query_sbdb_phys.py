@@ -1,37 +1,44 @@
 #!/usr/bin/env python
-"""Query JPL SBDB physical properties, including the rotation period.
+"""Download JPL SBDB physical properties in batches.
 
-SBDB answers one object per HTTP request (astroquery SBDB.query(..., phys=True)).
-A burst of parallel requests makes the server answer 403 Forbidden, so this
-script sends one request at a time and waits between them. It stops if several
-requests in a row are refused. The shared astroquery cache is left off.
+The single-object API (one HTTP request per asteroid) is what got refused
+with 403. The query API returns many objects per request. This script pages
+that catalog in batches of BATCH objects, then keeps the asteroids listed in
+data/mpc_designations.csv (every provid in df_set).
 
-The default target list is every asteroid provid in df_set, the same filter as
-search_spectra_rotation_orbit.ipynb. Writes data/sbdb_physical_properties.csv.
-A later run skips every provid already present in that file, including failed queries.
+Provids already stored in data/sbdb_physical_properties.csv are not requested
+again. The batch API does not include uncertainties or literature references,
+so sigma, reference, and note are left empty for newly added rows.
 """
 
+import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
-from astroquery.jplsbdb import SBDB
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
-OBS_FILE = DATA_DIR / "obs_sbn_X05_full.parquet"
-ROTATION_CATALOG = DATA_DIR / "asteroids-with-rotation.csv"
 OUT_FILE = DATA_DIR / "sbdb_physical_properties.csv"
-ASTEROID_PROVID = re.compile(r"^\d{4} [A-Z]{2}\d+[A-Z]?$")
+DESIGNATIONS = DATA_DIR / "mpc_designations.csv"
 
-WORKERS = 1
-PAUSE_S = 1.5
+API = "https://ssd-api.jpl.nasa.gov/sbdb_query.api"
+BATCH = 50000
+PAUSE_S = 1.0
 RETRIES = 3
-FORBIDDEN_PAUSE_S = 30
-STOP_AFTER_FORBIDDEN = 8
+USER_AGENT = "medellin-workshop-solarsystem research"
+
+PHYS_FIELDS = [
+    "diameter", "albedo", "rot_per", "H", "GM", "density",
+    "BV", "UB", "spec_T", "spec_B", "extent", "pole",
+]
+QUERY_FIELDS = ["pdes", "full_name", "name"] + PHYS_FIELDS
 COLUMNS = ["provid", "fullname", "parameter", "value", "sigma", "reference", "note"]
+NUMBERED = re.compile(r"^\((\d+)\)")
+PARENS = re.compile(r"\(([^)]+)\)")
 
 
 def format_elapsed(seconds):
@@ -43,158 +50,131 @@ def format_elapsed(seconds):
     return f"{minutes}m {secs:02d}s"
 
 
-def targets_from_df_set():
-    """Unique asteroid provids in df_set, the notebook's filtered observations."""
-    provids = pd.read_parquet(OBS_FILE, columns=["provid"])["provid"]
-    provids = provids.dropna().astype(str).str.strip()
-    provids = provids[provids.map(lambda pid: bool(ASTEROID_PROVID.match(pid)))]
-    provids = provids.drop_duplicates().sort_values()
-    print(f"Number of objects with provid: {len(provids)}")
-    return provids.tolist()
+def already_queried():
+    """Provids that already have a saved property row. Failures are not reused."""
+    if not OUT_FILE.exists():
+        return pd.DataFrame(columns=COLUMNS)
+    saved = pd.read_csv(OUT_FILE)
+    notes = saved["note"].fillna("").astype(str)
+    return saved.loc[~notes.str.startswith("query failed")].copy()
 
 
-def targets_from_rotation():
-    """Provids in asteroids-with-rotation.csv."""
-    df_rot = pd.read_csv(ROTATION_CATALOG)
-    provids = df_rot["provid"].dropna().astype(str).str.strip()
-    return provids[provids != ""].drop_duplicates().tolist()
+def load_targets():
+    """provid lookup from mpc_designations.csv, plus the MPC number when numbered."""
+    df = pd.read_csv(DESIGNATIONS)
+    df["provid"] = df["provid"].astype(str).str.strip()
+    by_provid = {}
+    by_number = {}
+    for provid, designation in zip(df["provid"], df["mpc_designation"].fillna("").astype(str)):
+        by_provid[provid] = designation.strip()
+        match = NUMBERED.match(designation.strip())
+        if match:
+            by_number[match.group(1)] = provid
+    return by_provid, by_number
 
 
-def targets_from_list():
-    """Edit this list to query a few objects."""
-    return [
-        "2025 MM82",
-        "2025 MA19",
-    ]
+def match_provids(pdes, full_name, by_provid, by_number):
+    found = []
+    pdes = "" if pdes is None else str(pdes).strip()
+    if pdes in by_provid:
+        found.append(pdes)
+    if pdes.isdigit() and pdes in by_number:
+        found.append(by_number[pdes])
+    for token in PARENS.findall(full_name or ""):
+        token = token.strip()
+        if token in by_provid:
+            found.append(token)
+    return list(dict.fromkeys(found))
 
 
-def query_phys(provid):
-    """One SBDB physical-property lookup. Returns rows for the output table."""
+def fetch_batch(limit_from):
+    params = urllib.parse.urlencode({
+        "fields": ",".join(QUERY_FIELDS),
+        "sb-kind": "a",
+        "limit": BATCH,
+        "limit-from": limit_from,
+    })
+    request = urllib.request.Request(API + "?" + params, headers={"User-Agent": USER_AGENT})
     last_error = None
     for attempt in range(1, RETRIES + 1):
         try:
-            sbdb = SBDB.query(str(provid), phys=True, cache=False)
-            break
+            with urllib.request.urlopen(request, timeout=180) as response:
+                return json.load(response)
         except Exception as exc:
             last_error = exc
-            # 403 means JPL is refusing the client. Wait before trying again.
-            if "403" in str(exc):
-                time.sleep(FORBIDDEN_PAUSE_S)
-            else:
-                time.sleep(attempt)
-    else:
-        return [{
-            "provid": provid,
-            "fullname": "",
-            "parameter": "",
-            "value": "",
-            "sigma": "",
-            "reference": "",
-            "note": f"query failed: {last_error}",
-        }]
+            time.sleep(5 * attempt)
+    raise RuntimeError(f"SBDB batch at {limit_from} failed: {last_error}")
 
-    phys = sbdb.get("phys_par") or {}
-    obj = sbdb.get("object") or {}
-    fullname = obj.get("fullname") or obj.get("des") or provid
+
+def rows_from_batch(payload, by_provid, by_number, done):
+    fields = payload["fields"]
+    index = {name: i for i, name in enumerate(fields)}
     rows = []
-    for key, value in phys.items():
-        if key.endswith(("_sig", "_ref", "_note")) or value in (None, ""):
-            continue
-        rows.append({
-            "provid": provid,
-            "fullname": fullname,
-            "parameter": key,
-            "value": value,
-            "sigma": phys.get(f"{key}_sig"),
-            "reference": phys.get(f"{key}_ref"),
-            "note": phys.get(f"{key}_note"),
-        })
-    if not rows:
-        rows.append({
-            "provid": provid,
-            "fullname": fullname,
-            "parameter": "",
-            "value": "",
-            "sigma": "",
-            "reference": "",
-            "note": "no physical properties",
-        })
+    for record in payload["data"]:
+        full_name = record[index["full_name"]] or ""
+        fullname = " ".join(str(full_name).split())
+        provids = match_provids(record[index["pdes"]], full_name, by_provid, by_number)
+        for provid in provids:
+            if provid in done:
+                continue
+            for field in PHYS_FIELDS:
+                value = record[index[field]]
+                if value in (None, ""):
+                    continue
+                rows.append({
+                    "provid": provid,
+                    "fullname": fullname,
+                    "parameter": field,
+                    "value": value,
+                    "sigma": "",
+                    "reference": "",
+                    "note": "",
+                })
     return rows
 
 
-def already_queried():
-    """Every provid already written to the output file. Nothing there is queried again."""
-    if not OUT_FILE.exists():
-        return set()
-    saved = pd.read_csv(OUT_FILE, usecols=["provid"])
-    return set(saved["provid"].dropna().astype(str).str.strip())
-
-
-def append_rows(rows):
-    frame = pd.DataFrame(rows, columns=COLUMNS)
-    write_header = not OUT_FILE.exists()
-    frame.to_csv(OUT_FILE, mode="a", header=write_header, index=False)
-
-
 def main():
-    # targets_from_df_set: every asteroid provid in the notebook's df_set
-    # targets_from_rotation: asteroids-with-rotation.csv
-    # targets_from_list: the list written inside that function
-    targets = targets_from_df_set()
-    done = already_queried()
-    pending = [provid for provid in targets if provid not in done]
-    print(f"{len(targets)} targets, {len(targets) - len(pending)} already saved, {len(pending)} to query")
-    print(f"One request every {PAUSE_S:.1f} s ({WORKERS} worker)")
+    kept = already_queried()
+    done = set(kept["provid"].dropna().astype(str).str.strip())
+    by_provid, by_number = load_targets()
+    pending = [provid for provid in by_provid if provid not in done]
+    print(f"{len(by_provid)} provids in mpc_designations.csv")
+    print(f"{len(done)} already saved, {len(pending)} still missing")
     if not pending:
         print(OUT_FILE)
         return
 
     t_start = time.perf_counter()
-    n_ok = 0
-    forbidden_in_a_row = 0
-    stopped = False
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {}
-        pending_iter = iter(pending)
-        for _ in range(WORKERS):
-            provid = next(pending_iter, None)
-            if provid is None:
-                break
-            futures[pool.submit(query_phys, provid)] = provid
-        while futures:
-            done = next(as_completed(futures))
-            provid = futures.pop(done)
-            rows = done.result()
-            append_rows(rows)
-            n_ok += 1
-            note = rows[0]["note"] or ""
-            if "403" in str(note):
-                forbidden_in_a_row += 1
-            else:
-                forbidden_in_a_row = 0
-            names = [row["parameter"] for row in rows if row["parameter"]]
-            label = ", ".join(names) if names else note
-            elapsed = time.perf_counter() - t_start
-            estimated = elapsed * len(pending) / n_ok
-            print(
-                f"{provid}: {label} | "
-                f"elapsed: {format_elapsed(elapsed)} ({n_ok}/{len(pending)}), "
-                f"estimated total: {format_elapsed(estimated)}"
-            )
-            if forbidden_in_a_row >= STOP_AFTER_FORBIDDEN:
-                print("SBDB is refusing requests (403). Stopping so the block can expire.")
-                print("Saved objects are skipped on the next run.")
-                stopped = True
-                break
+    new_rows = []
+    limit_from = 0
+    total = None
+    while total is None or limit_from < total:
+        payload = fetch_batch(limit_from)
+        total = int(payload["count"])
+        got = len(payload["data"])
+        if got == 0:
+            break
+        new_rows.extend(rows_from_batch(payload, by_provid, by_number, done))
+        limit_from += got
+        elapsed = time.perf_counter() - t_start
+        print(
+            f"batch {limit_from}/{total} | "
+            f"matched rows so far {len(new_rows)} | "
+            f"elapsed {format_elapsed(elapsed)}"
+        )
+        if limit_from < total:
             time.sleep(PAUSE_S)
-            provid = next(pending_iter, None)
-            if provid is not None:
-                futures[pool.submit(query_phys, provid)] = provid
 
-    if stopped:
-        print(f"Stopped after {n_ok} asteroids. File: {OUT_FILE}")
-    else:
-        print(f"Wrote {n_ok} asteroids to {OUT_FILE}")
+    added = pd.DataFrame(new_rows, columns=COLUMNS)
+    # A provid can be reached by its number and by its provisional designation.
+    added = added.drop_duplicates(["provid", "parameter"])
+    combined = pd.concat([kept, added], ignore_index=True)
+    tmp = OUT_FILE.with_suffix(".csv.tmp")
+    combined.to_csv(tmp, index=False)
+    tmp.replace(OUT_FILE)
+    n_provid = combined["provid"].nunique()
+    print(f"Wrote {len(combined)} rows for {n_provid} asteroids to {OUT_FILE}")
+    print(f"Added {added['provid'].nunique()} asteroids in {format_elapsed(time.perf_counter() - t_start)}")
 
 
 if __name__ == "__main__":
