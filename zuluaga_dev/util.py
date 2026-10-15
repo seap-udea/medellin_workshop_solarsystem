@@ -323,14 +323,14 @@ def query_dists_and_elements(nombre_objeto, obstimes, batch_size=50):
 
 import re
 
-def geometry_designations():
+def geometry_designations(datafile):
     """Map an MPC number, and a provisional designation, to mpc_designation.
 
     Numbered asteroids are stored as '(1232) Cortusa', not as '1931 TF2'.
     Unnumbered ones keep the provisional designation.
     """
     designations = pd.read_parquet(
-        "data/obs_final_elements_geometry_H.parquet",
+        datafile,
         columns=["mpc_designation"],
     )["mpc_designation"].dropna().astype(str).unique()
     by_number, by_provid = {}, {}
@@ -344,9 +344,9 @@ def geometry_designations():
     return by_number, by_provid
 
 
-def mpc_designation_for(df_set, provid, permid=None):
+def mpc_designation_for(df_set, provid, datafile, permid=None):
     """Geometry-file designation for this asteroid, or None."""
-    by_number, by_provid = geometry_designations()
+    by_number, by_provid = geometry_designations(datafile)
     if permid is None:
         ids = df_set.loc[df_set["provid"] == provid, "permid"].dropna()
         if len(ids):
