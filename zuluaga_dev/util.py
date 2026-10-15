@@ -76,20 +76,37 @@ def get_data(data_dir='data/'):
         },
         {
             "filename": data_dir + "asteroids-with-rotation.csv",
-            "cmd": 'gdown 1afQHJYa6bAyIhbP1_dwBoyY0YYzMI7y5'
+            "cmd": f'gdown -O {data_dir}asteroids-with-rotation.csv 1afQHJYa6bAyIhbP1_dwBoyY0YYzMI7y5'
         },
         {
             "filename": data_dir + "X05_simplified.csv",
-            "cmd": 'gdown 1bre3OmMF1xvr3puWUfhhUq_OwRXFltS5'
+            "cmd": f'gdown -O {data_dir}X05_simplified.csv 1bre3OmMF1xvr3puWUfhhUq_OwRXFltS5'
+        },
+        {
+            "filename": data_dir + "obs_final_elements_geometry_H.parquet",
+            "cmd": f'gdown -O {data_dir}obs_final_elements_geometry_H.parquet 1jvuymsOJ8gKjKQ5fMruuqP_K_FNAvMxs'
+        },
+        {
+            "filename": data_dir + "sbdb_physical_properties.csv",
+            "cmd": f'gdown -O {data_dir}sbdb_physical_properties.csv 1bai9ysjkai3nPdRDgjGxxooBFfqOho0D'
+        },
+        {
+            "filename": data_dir + "mpc_designations.csv",
+            "cmd": f'gdown -O {data_dir}mpc_designations.csv 1ye9aftlBReq9HvJX0RzGWz2gB-G4pQkO'
         }
     ]
 
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
     for file in files:
-        if os.path.exists(file["filename"]):
-            print(f"Data already exists: {file['filename']}")
+        dest = file["filename"]
+        # Older gdown calls saved these next to the notebook, not in data/.
+        local = os.path.basename(dest)
+        if not os.path.exists(dest) and os.path.exists(local):
+            os.replace(local, dest)
+        if os.path.exists(dest):
+            print(f"Data already exists: {dest}")
         else:
-            print(f"Downloading {file['filename']}...")
+            print(f"Downloading {dest}...")
             retval = os.system(file["cmd"])
             if retval != 0:
                 raise RuntimeError(f"Error while downloading: {file['cmd']}")
